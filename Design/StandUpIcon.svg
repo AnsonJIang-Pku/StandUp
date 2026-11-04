@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <title>StandUp</title>
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2=".85" y2="1">
+      <stop stop-color="#208677"/>
+      <stop offset=".55" stop-color="#126253"/>
+      <stop offset="1" stop-color="#0b3b38"/>
+    </linearGradient>
+    <linearGradient id="edge" x1="0" y1="0" x2=".7" y2="1">
+      <stop stop-color="#fff" stop-opacity=".36"/>
+      <stop offset=".55" stop-color="#fff" stop-opacity=".06"/>
+      <stop offset="1" stop-color="#001d19" stop-opacity=".38"/>
+    </linearGradient>
+    <linearGradient id="person" gradientUnits="userSpaceOnUse" x1="435" y1="310" x2="520" y2="752">
+      <stop stop-color="#fffdf2"/>
+      <stop offset="1" stop-color="#e1f2dd"/>
+    </linearGradient>
+    <linearGradient id="arrow" gradientUnits="userSpaceOnUse" x1="621" y1="425" x2="745" y2="286">
+      <stop stop-color="#9ceb9b"/>
+      <stop offset="1" stop-color="#d4ff9b"/>
+    </linearGradient>
+    <filter id="shadow" x="-.12" y="-.12" width="1.24" height="1.26">
+      <feGaussianBlur stdDeviation="17"/>
+    </filter>
+  </defs>
+  <rect x="95" y="111" width="834" height="834" rx="184" fill="#062822" opacity=".34" filter="url(#shadow)"/>
+  <rect x="94" y="94" width="836" height="836" rx="184" fill="url(#tile)"/>
+  <rect x="97" y="97" width="830" height="830" rx="181" fill="none" stroke="url(#edge)" stroke-width="6"/>
+  <g transform="translate(-5 6)" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M304 752H361L426 631L502 552L443 446M445 450L381 510L312 512M449 456L514 491L571 441M428 629L534 641L570 752H637"
+          fill="none" stroke="url(#person)" stroke-width="58"/>
+    <circle cx="469" cy="348" r="51" fill="url(#person)"/>
+    <path d="M606 400L736 270M644 270H736V362"
+          fill="none" stroke="url(#arrow)" stroke-width="45"/>
+  </g>
+</svg>

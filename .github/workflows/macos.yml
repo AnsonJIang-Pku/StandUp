@@ -1,0 +1,46 @@
+name: macOS CI
+
+on:
+  push:
+    branches: [main]
+    paths: &build_paths
+      - 'App/**'
+      - 'Sources/**'
+      - 'Tests/**'
+      - 'StandUp.xcodeproj/**'
+      - 'Package.swift'
+      - '.github/workflows/macos.yml'
+  pull_request:
+    branches: [main]
+    paths: *build_paths
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test-and-build:
+    runs-on: macos-15
+    timeout-minutes: 12
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Run Swift tests
+        run: swift test
+
+      - name: Build and verify the Universal app
+        run: |
+          xcodebuild -project StandUp.xcodeproj -scheme StandUp -configuration Release \
+            -destination 'generic/platform=macOS' -derivedDataPath build \
+            ARCHS='arm64 x86_64' ONLY_ACTIVE_ARCH=NO build
+          app=build/Build/Products/Release/StandUp.app
+          xcrun lipo "$app/Contents/MacOS/StandUp" -verify_arch arm64 x86_64
+          codesign --verify --deep --strict "$app"
