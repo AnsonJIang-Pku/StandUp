@@ -11,6 +11,9 @@ final class AppModel: ObservableObject {
     private let notifications: NotificationService
     private let sleepWake = SleepWakeMonitor()
     private let now: () -> Date
+    private let notificationRetryDelay: () async throws -> Void
+    private(set) var notificationTask: Task<Void, Never>?
+    private var notificationCleanupTask: Task<Void, Never>?
     private let canSave: Bool
     private var lastSaved: LocalData
     private var deadlineTimer: Timer?
@@ -19,15 +22,20 @@ final class AppModel: ObservableObject {
     private var requestingPermission = false
     @Published private var date: Date
     @Published private(set) var notificationStatus: NotificationStatus = .notDetermined
+    @Published private(set) var notificationSubmission: NotificationSubmissionState = .idle
     @Published private(set) var loginStatus: SMAppService.Status = .notRegistered
     @Published private var loginError: String?
     @Published private(set) var storageError: String?
 
     init(persistence: PersistenceService = .standard, center: LocalNotificationCenter = UNUserNotificationCenter.current(),
-         now: @escaping () -> Date = { Date() }) {
+         now: @escaping () -> Date = { Date() },
+         notificationRetryDelay: @escaping () async throws -> Void = {
+             try await Task.sleep(nanoseconds: 350_000_000)
+         }) {
         self.persistence = persistence
         self.notifications = NotificationService(center: center)
         self.now = now
+        self.notificationRetryDelay = notificationRetryDelay
         self.date = now()
         let data: LocalData
         do {
@@ -85,6 +93,10 @@ final class AppModel: ObservableObject {
         if state != .breakDue { notifications.clear() }
         send(.applicationLaunched)
         refreshSystemSettings()
+        notificationCleanupTask = Task { [weak self] in
+            guard let self else { return }
+            await notifications.cleanUpPreviousRequests(keepingDelivered: isCurrentReminder)
+        }
     }
 
     func shutdown() {
@@ -92,6 +104,8 @@ final class AppModel: ObservableObject {
         deadlineTimer?.invalidate()
         ticker?.cancel()
         sleepWake.stop()
+        notificationCleanupTask?.cancel()
+        cancelNotificationSubmission()
         notifications.cancelPending()
         saveIfNeeded()
     }
@@ -101,7 +115,10 @@ final class AppModel: ObservableObject {
         let effects = session.handle(event)
         date = now()
         saveIfNeeded()
-        if event == .systemWillSleep { notifications.cancelPending() }
+        if event == .systemWillSleep {
+            cancelNotificationSubmission()
+            notifications.cancelPending()
+        }
         publish(effects)
     }
 
@@ -120,24 +137,77 @@ final class AppModel: ObservableObject {
     }
 
     private func publish(_ effects: [TimerEffect]) {
-        let workMinutes = activeConfiguration.workMinutes
-        let canSnooze = self.canSnooze
         for effect in effects {
             switch effect {
             case .clearReminder:
+                cancelNotificationSubmission()
                 notifications.clear()
             case let .remind(id):
-                Task { [weak self] in
-                    guard let self else { return }
-                    notificationStatus = await notifications.notify(id, workMinutes: workMinutes, canSnooze: canSnooze) {
-                        self.isCurrentReminder(id)
-                    }
-                }
+                submitReminder(id, attemptLimit: 2)
             case .record:
                 break
             }
         }
         scheduleChecks()
+    }
+
+    var canResendReminder: Bool {
+        notificationSubmission == .failed && stageID.map(isCurrentReminder) == true
+    }
+
+    func resendReminder() {
+        guard canResendReminder, let id = stageID else { return }
+        submitReminder(id, attemptLimit: 1)
+    }
+
+    private func cancelNotificationSubmission() {
+        notificationTask?.cancel()
+        notificationTask = nil
+        notificationSubmission = .idle
+    }
+
+    private func submitReminder(_ id: UUID, attemptLimit: Int) {
+        cancelNotificationSubmission()
+        notificationSubmission = .submitting
+        let workMinutes = activeConfiguration.workMinutes
+        let canSnooze = self.canSnooze
+        notificationTask = Task { [weak self] in
+            guard let self else { return }
+            defer {
+                if !Task.isCancelled {
+                    if notificationSubmission == .submitting { notificationSubmission = .idle }
+                    notificationTask = nil
+                }
+            }
+            for attempt in 1...attemptLimit {
+                guard !Task.isCancelled, isCurrentReminder(id) else { return }
+                let result = await notifications.notify(id, workMinutes: workMinutes, canSnooze: canSnooze) {
+                    self.isCurrentReminder(id)
+                }
+                guard !Task.isCancelled, isCurrentReminder(id) else { return }
+                notificationStatus = result.authorization
+                if result.submission != .failed || attempt == attemptLimit {
+                    notificationSubmission = result.submission
+                    return
+                }
+                do {
+                    try await notificationRetryDelay()
+                } catch {
+                    return
+                }
+            }
+        }
+    }
+
+    func canPresentReminder(_ request: UNNotificationRequest) -> Bool {
+        NotificationService.token(for: request).map(isCurrentReminder) == true && notifications.canPresent(request)
+    }
+
+    func handleReminderAction(_ action: String, request: UNNotificationRequest) {
+        guard let id = NotificationService.token(for: request), isCurrentReminder(id),
+              notifications.canHandle(request),
+              let event = NotificationService.event(for: action, token: id) else { return }
+        send(event)
     }
 
     func isCurrentReminder(_ id: UUID) -> Bool {

@@ -41,25 +41,226 @@ final class AppModelNotificationTests: XCTestCase {
                 checking.fulfill()
             }
         }
-        let finished = expectation(description: "Notification attempt completed")
-        let observation = model.$notificationStatus.dropFirst().prefix(1).sink { _ in
-            finished.fulfill()
-        }
-        defer { observation.cancel() }
-
         model.send(.startWork)
         clock.advance(1800)
         model.send(.refresh)
         let token = try XCTUnwrap(model.stageID)
+        let task = try XCTUnwrap(model.notificationTask)
         XCTAssertTrue(model.isCurrentReminder(token))
         await fulfillment(of: [checking], timeout: 3)
         model.send(.stop)
         XCTAssertFalse(model.isCurrentReminder(token))
         try XCTUnwrap(authorization).resume(returning: .authorized)
 
-        await fulfillment(of: [finished], timeout: 3)
+        await task.value
         XCTAssertEqual(center.additions, 0)
         XCTAssertEqual(center.pending.count, 0)
+    }
+
+    @MainActor
+    func testFirstFailureRetriesOnceAndSubmits() async throws {
+        let fixture = makeRetryFixture()
+        defer { fixture.close() }
+        let task = try fixture.makeReminder()
+        await fulfillment(of: [try XCTUnwrap(fixture.waiting)], timeout: 3)
+        XCTAssertEqual(fixture.center.additions, 1)
+        XCTAssertTrue(fixture.center.pending.isEmpty)
+        XCTAssertEqual(fixture.model.notificationSubmission, .submitting)
+
+        fixture.center.addError = nil
+        fixture.releaseDelay()
+        await task.value
+
+        XCTAssertEqual(fixture.center.additions, 2)
+        XCTAssertEqual(fixture.center.pending.count, 1)
+        XCTAssertEqual(fixture.model.notificationSubmission, .submitted)
+        XCTAssertEqual(fixture.model.state, .breakDue)
+    }
+
+    @MainActor
+    func testStoppingDuringSystemSubmissionRejectsLateDeliveryAndAction() async throws {
+        let fixture = makeRetryFixture(expectDelay: false)
+        defer { fixture.close() }
+        fixture.center.deferCompletions = true
+        let added = expectation(description: "System submission started")
+        fixture.center.onAdd = { added.fulfill() }
+        let task = try fixture.makeReminder()
+        await fulfillment(of: [added], timeout: 3)
+
+        fixture.model.send(.stop)
+        fixture.center.completeSubmission(at: 0, deliveredImmediately: true)
+        let lateRequest = try XCTUnwrap(fixture.center.delivered.values.first)
+        XCTAssertFalse(fixture.model.canPresentReminder(lateRequest))
+        fixture.model.handleReminderAction("STANDUP_START_BREAK", request: lateRequest)
+        await task.value
+
+        XCTAssertEqual(fixture.center.additions, 1)
+        XCTAssertTrue(fixture.center.pending.isEmpty)
+        XCTAssertTrue(fixture.center.delivered.isEmpty)
+        XCTAssertEqual(fixture.model.state, .idle)
+        XCTAssertEqual(fixture.model.notificationSubmission, .idle)
+    }
+
+    @MainActor
+    func testTwoFailuresKeepBreakDueAndOfferManualResend() async throws {
+        let fixture = makeRetryFixture()
+        defer { fixture.close() }
+        let task = try fixture.makeReminder()
+        let token = fixture.model.stageID
+        await fulfillment(of: [try XCTUnwrap(fixture.waiting)], timeout: 3)
+        fixture.releaseDelay()
+        await task.value
+
+        XCTAssertEqual(fixture.center.additions, 2)
+        XCTAssertTrue(fixture.center.pending.isEmpty)
+        XCTAssertEqual(fixture.model.notificationStatus, .allowed)
+        XCTAssertEqual(fixture.model.notificationSubmission, .failed)
+        XCTAssertEqual(fixture.model.state, .breakDue)
+        XCTAssertEqual(fixture.model.stageID, token)
+        XCTAssertTrue(fixture.model.canResendReminder)
+
+        fixture.center.addError = nil
+        fixture.model.resendReminder()
+        let resend = try XCTUnwrap(fixture.model.notificationTask)
+        await resend.value
+        XCTAssertEqual(fixture.center.additions, 3)
+        XCTAssertEqual(fixture.center.pending.count, 1)
+        XCTAssertEqual(fixture.center.pending.values.first.flatMap(NotificationService.token(for:)), token)
+        XCTAssertEqual(fixture.model.notificationSubmission, .submitted)
+        XCTAssertFalse(fixture.model.canResendReminder)
+    }
+
+    @MainActor
+    func testStoppingDuringRetryDelayCancelsRetry() async throws {
+        try await checkRetryInterrupted { fixture in
+            fixture.model.send(.stop)
+            XCTAssertEqual(fixture.model.state, .idle)
+        }
+    }
+
+    @MainActor
+    func testPausingDuringRetryDelayCancelsRetry() async throws {
+        try await checkRetryInterrupted { fixture in
+            fixture.model.send(.pause)
+            XCTAssertEqual(fixture.model.state, .paused)
+        }
+    }
+
+    @MainActor
+    func testExpiringTokenDuringRetryDelaySkipsRetry() async throws {
+        try await checkRetryInterrupted { fixture in
+            fixture.clock.advance(12 * 3600)
+            XCTAssertFalse(fixture.model.isCurrentReminder(fixture.model.stageID!))
+        }
+    }
+
+    @MainActor
+    func testShutdownDuringRetryDelayCancelsRetry() async throws {
+        try await checkRetryInterrupted { fixture in
+            fixture.model.shutdown()
+        }
+    }
+
+    @MainActor
+    func testDeniedPermissionDoesNotSubmitOrWaitForRetry() async throws {
+        let fixture = makeRetryFixture(expectDelay: false)
+        defer { fixture.close() }
+        fixture.center.permission = .denied
+        let task = try fixture.makeReminder()
+        await task.value
+
+        XCTAssertNil(fixture.delay)
+        XCTAssertEqual(fixture.center.additions, 0)
+        XCTAssertTrue(fixture.center.pending.isEmpty)
+        XCTAssertEqual(fixture.model.notificationStatus, .denied)
+        XCTAssertEqual(fixture.model.notificationSubmission, .idle)
+        XCTAssertEqual(fixture.model.state, .breakDue)
+    }
+
+    @MainActor
+    func testPermissionRevokedDuringSubmissionDoesNotRetry() async throws {
+        let fixture = makeRetryFixture(expectDelay: false)
+        defer { fixture.close() }
+        fixture.center.addError = NSError(domain: UNErrorDomain, code: UNError.Code.notificationsNotAllowed.rawValue)
+        let task = try fixture.makeReminder()
+        await task.value
+
+        XCTAssertNil(fixture.delay)
+        XCTAssertEqual(fixture.center.additions, 1)
+        XCTAssertTrue(fixture.center.pending.isEmpty)
+        XCTAssertEqual(fixture.model.notificationStatus, .denied)
+        XCTAssertEqual(fixture.model.notificationSubmission, .idle)
+    }
+
+    @MainActor
+    private func checkRetryInterrupted(_ interrupt: (RetryFixture) -> Void) async throws {
+        let fixture = makeRetryFixture()
+        defer { fixture.close() }
+        let task = try fixture.makeReminder()
+        await fulfillment(of: [try XCTUnwrap(fixture.waiting)], timeout: 3)
+        interrupt(fixture)
+        fixture.releaseDelay()
+        await task.value
+        XCTAssertEqual(fixture.center.additions, 1)
+        XCTAssertTrue(fixture.center.pending.isEmpty)
+        XCTAssertFalse(fixture.model.canResendReminder)
+        XCTAssertEqual(fixture.model.notificationSubmission, .idle)
+    }
+
+    @MainActor
+    private func makeRetryFixture(expectDelay: Bool = true) -> RetryFixture {
+        RetryFixture(clock: makeClock(), waiting: expectDelay ? expectation(description: "Retry delay reached") : nil)
+    }
+
+    @MainActor
+    private final class RetryFixture {
+        let clock: TestClock
+        let waiting: XCTestExpectation?
+        let center = MockNotificationCenter()
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        var delay: CheckedContinuation<Void, Never>?
+        lazy var model = AppModel(
+            persistence: PersistenceService(url: directory.appendingPathComponent("state.json")),
+            center: center,
+            now: { [clock] in clock.now },
+            notificationRetryDelay: { [weak self] in
+                guard let self else { return }
+                guard self.waiting != nil else {
+                    XCTFail("Unexpected retry")
+                    throw CancellationError()
+                }
+                await withCheckedContinuation { continuation in
+                    self.delay = continuation
+                    self.waiting?.fulfill()
+                }
+            }
+        )
+
+        init(clock: TestClock, waiting: XCTestExpectation?) {
+            self.clock = clock
+            self.waiting = waiting
+            center.addError = CocoaError(.fileWriteUnknown)
+        }
+
+        func makeReminder() throws -> Task<Void, Never> {
+            model.start()
+            model.send(.startWork)
+            clock.advance(1800)
+            model.send(.refresh)
+            return try XCTUnwrap(model.notificationTask)
+        }
+
+        func releaseDelay() {
+            let waiting = delay
+            delay = nil
+            waiting?.resume()
+        }
+
+        func close() {
+            model.shutdown()
+            releaseDelay()
+            try? FileManager.default.removeItem(at: directory)
+        }
     }
 
     @MainActor

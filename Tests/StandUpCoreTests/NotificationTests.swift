@@ -10,7 +10,7 @@ final class MockNotificationCenter: LocalNotificationCenter {
     var categories: Set<UNNotificationCategory> = []
     var requestedOptions: UNAuthorizationOptions = []
     var pending: [String: UNNotificationRequest] = [:]
-    var delivered: Set<String> = []
+    var delivered: [String: UNNotificationRequest] = [:]
     var additions = 0
     var authorization: (() async -> UNAuthorizationStatus)?
     var onAdd: (() -> Void)?
@@ -39,18 +39,28 @@ final class MockNotificationCenter: LocalNotificationCenter {
         onAdd?()
     }
 
-    func completeSubmission(at index: Int, error: Error? = nil) {
+    func completeSubmission(at index: Int, error: Error? = nil, deliveredImmediately: Bool = false) {
         let (request, handler) = submissions.remove(at: index)
-        if error == nil { pending[request.identifier] = request }
+        if error == nil {
+            if deliveredImmediately {
+                delivered[request.identifier] = request
+            } else {
+                pending[request.identifier] = request
+            }
+        }
         handler?(error)
     }
+
+    func pendingNotificationRequests() async -> [UNNotificationRequest] { Array(pending.values) }
+
+    func deliveredNotificationRequests() async -> [UNNotificationRequest] { Array(delivered.values) }
 
     func removePendingNotificationRequests(withIdentifiers identifiers: [String]) {
         for id in identifiers { pending.removeValue(forKey: id) }
     }
 
     func removeDeliveredNotifications(withIdentifiers identifiers: [String]) {
-        delivered.subtract(identifiers)
+        for id in identifiers { delivered.removeValue(forKey: id) }
     }
 }
 
@@ -72,8 +82,8 @@ final class NotificationTests: XCTestCase {
         XCTAssertEqual(allowed, .allowed)
         await service.notify(token) { true }
         let request = try XCTUnwrap(center.pending.values.first)
-        XCTAssertEqual(request.identifier, NotificationService.identifier)
-        XCTAssertEqual(request.content.categoryIdentifier, request.identifier)
+        XCTAssertTrue(request.identifier.hasPrefix(NotificationService.identifier + "."))
+        XCTAssertEqual(request.content.categoryIdentifier, NotificationService.identifier)
         XCTAssertEqual(request.content.title, "该起来活动一下了！")
         XCTAssertTrue(request.content.body.contains("30 分钟"))
         XCTAssertNotNil(request.content.sound)
@@ -217,6 +227,124 @@ final class NotificationTests: XCTestCase {
         XCTAssertEqual(center.additions, 2)
         XCTAssertEqual(center.pending.count, 1)
         XCTAssertEqual(center.pending.values.first.flatMap(NotificationService.token(for:)), newToken)
+    }
+
+    @MainActor
+    func testClearRemovesLatePendingAndDeliveredSubmissions() async {
+        for deliveredImmediately in [false, true] {
+            let center = MockNotificationCenter()
+            let service = NotificationService(center: center)
+            let token = UUID()
+            let task = await beginDeferredSubmission(token, service: service, center: center)
+
+            service.clear()
+            center.completeSubmission(at: 0, deliveredImmediately: deliveredImmediately)
+            let result = await task.value
+
+            XCTAssertEqual(result.submission, .idle)
+            XCTAssertEqual(center.additions, 1)
+            XCTAssertTrue(center.pending.isEmpty)
+            XCTAssertTrue(center.delivered.isEmpty)
+        }
+    }
+
+    @MainActor
+    func testCancelledSubmissionCompletesBeforeNewerSubmission() async {
+        let center = MockNotificationCenter()
+        let service = NotificationService(center: center)
+        let old = await beginDeferredSubmission(UUID(), service: service, center: center)
+        service.cancelPending()
+
+        let newToken = UUID()
+        let new = await beginDeferredSubmission(newToken, service: service, center: center)
+        center.completeSubmission(at: 0)
+        _ = await old.value
+        XCTAssertTrue(center.pending.isEmpty)
+        center.completeSubmission(at: 0)
+        _ = await new.value
+
+        XCTAssertEqual(center.additions, 2)
+        XCTAssertEqual(center.pending.count, 1)
+        XCTAssertEqual(center.pending.values.first.flatMap(NotificationService.token(for:)), newToken)
+        XCTAssertTrue(center.delivered.isEmpty)
+    }
+
+    @MainActor
+    func testLateSuccessfulSubmissionDoesNotRemoveNewerSubmission() async throws {
+        let center = MockNotificationCenter()
+        let service = NotificationService(center: center)
+        let old = await beginDeferredSubmission(UUID(), service: service, center: center)
+        let newToken = UUID()
+        let new = await beginDeferredSubmission(newToken, service: service, center: center)
+
+        center.completeSubmission(at: 1)
+        _ = await new.value
+        let newRequest = try XCTUnwrap(center.pending.values.first)
+        center.completeSubmission(at: 0, deliveredImmediately: true)
+        _ = await old.value
+
+        XCTAssertEqual(center.additions, 2)
+        XCTAssertEqual(Set(center.pending.keys), [newRequest.identifier])
+        XCTAssertTrue(center.delivered.isEmpty)
+        XCTAssertTrue(service.canPresent(newRequest))
+        XCTAssertEqual(NotificationService.token(for: newRequest), newToken)
+    }
+
+    @MainActor
+    func testCancelPendingPreservesDeliveredNotification() async throws {
+        let center = MockNotificationCenter()
+        let service = NotificationService(center: center)
+        let task = await beginDeferredSubmission(UUID(), service: service, center: center)
+        center.completeSubmission(at: 0, deliveredImmediately: true)
+        _ = await task.value
+        let delivered = try XCTUnwrap(center.delivered.values.first)
+
+        service.cancelPending()
+        XCTAssertEqual(center.additions, 1)
+        XCTAssertTrue(center.pending.isEmpty)
+        XCTAssertEqual(Set(center.delivered.keys), [delivered.identifier])
+        XCTAssertTrue(service.canHandle(delivered))
+        service.clear()
+        XCTAssertTrue(center.delivered.isEmpty)
+        XCTAssertFalse(service.canHandle(delivered))
+    }
+
+    @MainActor
+    func testStartupCleansUpPriorAttemptsAndPreservesCurrentDeliveredReminder() async {
+        let center = MockNotificationCenter()
+        let previousService = NotificationService(center: center)
+        let currentToken = UUID()
+        let delivered = await beginDeferredSubmission(currentToken, service: previousService, center: center)
+        center.completeSubmission(at: 0, deliveredImmediately: true)
+        _ = await delivered.value
+        let otherContent = UNMutableNotificationContent()
+        otherContent.userInfo = ["reminderID": UUID().uuidString]
+        let obsolete = UNNotificationRequest(identifier: NotificationService.identifier, content: otherContent, trigger: nil)
+        center.pending[obsolete.identifier] = obsolete
+        center.delivered[obsolete.identifier] = obsolete
+
+        let service = NotificationService(center: center)
+        await service.cleanUpPreviousRequests { $0 == currentToken }
+
+        XCTAssertTrue(center.pending.isEmpty)
+        XCTAssertEqual(center.delivered.count, 1)
+        XCTAssertEqual(center.delivered.values.first.flatMap(NotificationService.token(for:)), currentToken)
+        XCTAssertTrue(center.delivered.values.allSatisfy(service.canHandle))
+        service.clear()
+        XCTAssertTrue(center.delivered.isEmpty)
+    }
+
+    @MainActor
+    private func beginDeferredSubmission(
+        _ token: UUID, service: NotificationService, center: MockNotificationCenter
+    ) async -> Task<(authorization: NotificationStatus, submission: NotificationSubmissionState), Never> {
+        center.deferCompletions = true
+        let added = expectation(description: "Request handed to the notification center")
+        center.onAdd = { added.fulfill() }
+        let task = Task { await service.notify(token) { true } }
+        await fulfillment(of: [added], timeout: 3)
+        center.onAdd = nil
+        return task
     }
 
     @MainActor

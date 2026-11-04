@@ -1,29 +1,29 @@
-# StandUp 1.1 测试报告
+# StandUp 1.1.2 测试报告
 
-验证日期为 2026-11-04。测试主机运行 macOS 14.6.1，采用 Apple Silicon、Xcode 16.2、Swift 6.0.3 和 macOS SDK 15.2。
+应用版本为 1.1.2，Build 4。2026-11-04 在 Apple Silicon 的 macOS 14.6.1 上验证。工具链为 Xcode 16.2、Swift 6.0.3、macOS SDK 15.2。
 
-## 单元测试
+## 自动化测试
 
-`swift test` 执行 **59 项，59 项通过，0 项失败，100% 通过**。原有 33 个测试场景均通过。计时和日历用例使用可控时钟及固定日期。
+`swift test` 实际执行 **82 项，82 项通过，0 项失败**。包含 1.1.1 的 68 项测试，以及本次新增的 14 项。通知测试使用可控回调和退避，计时用例使用可控时钟。
 
-| 测试组 | 数量 | 覆盖 |
+| 测试组 | 通过 | 验证内容 |
 | --- | ---: | --- |
-| TimerEngineTests | 17 | 原有计时、提醒去重、暂停、恢复、睡眠和时段边界 |
-| ConfigurationTests | 5 | 直接输入与溢出校验、默认值、四个内置预设、自定义预设增删改和持久化 |
-| SessionConfigurationTests | 9 | 本轮快照、下一轮和主动重新开始采用新配置、切换预设、延迟上限与重置、暂停重启恢复、跨午夜和日程即时生效 |
-| SchedulePolicyTests | 9 | 逐日日程、全天、取消限制、相同起止时间校验、跨午夜、时区与夏令时 |
-| MigrationTests | 4 | 1.0 原始备份、会话与历史统计保留、字段默认值、局部损坏和较新版本保护 |
-| PersistenceTests | 6 | 会话截止时间、设置、损坏数据和计数去重 |
-| NotificationTests | 6 | 权限、通知操作、去重、提示音、实际工作时长与延迟用完时的操作 |
-| StatisticsTests | 3 | 五项指标、本地日期、去重与保留期 |
+| NotificationTests | 14 | 延迟成功后的队列清理、跨请求成功或失败回调乱序、提交中及成功后去重、失败可重试、取消保留已送达项、启动清理、通知内容与提示音资源 |
+| AppModelNotificationTests | 12 | 保存成功或失败时提交、等待权限时作废、单次自动重试、连续失败和手动重发、停止、暂停、过期或退出取消重试、权限拒绝或撤销、阻止已失效的通知展示和操作 |
+| ConfigurationTests | 8 | 参数校验、预设、关闭全局日程时保存草稿 |
+| MigrationTests | 4 | 1.0 备份及迁移、默认值、损坏数据及较新版本保护 |
+| PersistenceTests | 6 | 会话截止时间、设置、损坏数据、计数去重 |
+| SchedulePolicyTests | 9 | 逐日、全天、跨午夜、时区与夏令时 |
+| SessionConfigurationTests | 9 | 会话快照、预设、延迟上限、重启、跨午夜及日程即时生效 |
+| StatisticsTests | 3 | 指标、本地日期、保留期与去重 |
+| TimerEngineTests | 17 | 原有计时、阶段转换、睡眠事件及时间边界 |
 
-## 构建与集成验证
+## 构建和 GitHub Actions
 
-- Xcode Universal Release 构建成功。应用版本为 1.1，构建号为 2。arm64 和 x86_64 切片的最低系统版本均为 macOS 13.0。
-- `codesign --verify --deep --strict` 通过。应用包包含原创图标和 Soft AIFF 资源。
-- 在 macOS 14.6.1 上用独立数据目录和受控时钟运行 AppModel。确认 1.0 数据备份逐字节一致，旧阶段与统计保留。保存预设后旧倒计时保持原值，重新启动恢复旧轮与新设置，主动重新开始后使用新配置。日程改到当前时段之外后，会话结束并写入磁盘。
-- 使用同一套 SwiftUI 视图渲染了四个设置分区和菜单栏主面板，检查了浅色界面、深色日程页、旧轮与新配置的分别显示，以及开发者署名。
+- Xcode Universal Release 构建成功。包内包含 arm64 和 x86_64，两者最低系统版本均为 macOS 13.0。
+- `codesign --verify --deep --strict` 通过，应用为本地 ad-hoc 签名。
+- 远端 `main` 基线为 1.1.1 的 `acc82cc09ccdc336043575f6590c5acd66729ea2`，macOS CI 已通过。本报告记录 1.1.2 的本地验证。远端检查记录见 [macOS CI](https://github.com/AnsonJIang-Pku/StandUp/actions/workflows/macos.yml)。[基线 CI 运行](https://github.com/AnsonJIang-Pku/StandUp/actions/runs/41794002841)
 
-## 验证边界
+## 实机验证边界
 
-隔离测试窗口已读取到 SwiftUI 控件。Mac 锁屏期间无法完成实际点击，菜单栏弹窗的交互仍待实机确认。系统通知横幅、声音播放、整机睡眠、登录启动以及 Intel 和 macOS 13 的运行也仍待实机确认。系统通知动作通过模拟通知中心验证，睡眠和时区通过固定时钟及事件验证。迁移测试使用隔离样本。
+竞态测试验证的是模拟通知中心的最终待发送和已送达队列。实际横幅、提示音、锁屏通知、通知中心移除时序和整机睡眠唤醒仍待实机确认。

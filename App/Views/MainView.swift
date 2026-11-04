@@ -55,6 +55,17 @@ struct MainView: View {
                 }
             }
 
+            if !showingSettings && model.canResendReminder {
+                HStack {
+                    Label("提醒提交失败", systemImage: "bell.badge")
+                    Spacer()
+                    Button("重新发送", action: model.resendReminder)
+                        .buttonStyle(.borderless)
+                }
+                .font(.callout)
+                .foregroundStyle(.secondary)
+            }
+
             if let error = model.storageError {
                 Label(error, systemImage: "exclamationmark.circle")
                     .font(.callout)

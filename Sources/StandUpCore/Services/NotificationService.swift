@@ -14,12 +14,18 @@ public enum NotificationStatus: Equatable {
     }
 }
 
+public enum NotificationSubmissionState: Equatable {
+    case idle, submitting, submitted, failed
+}
+
 @MainActor
 public protocol LocalNotificationCenter {
     func setNotificationCategories(_ categories: Set<UNNotificationCategory>)
     func authorizationStatus() async -> UNAuthorizationStatus
     func requestAuthorization(options: UNAuthorizationOptions) async throws -> Bool
     func add(_ request: UNNotificationRequest, withCompletionHandler handler: ((Error?) -> Void)?)
+    func pendingNotificationRequests() async -> [UNNotificationRequest]
+    func deliveredNotificationRequests() async -> [UNNotificationRequest]
     func removePendingNotificationRequests(withIdentifiers identifiers: [String])
     func removeDeliveredNotifications(withIdentifiers identifiers: [String])
 }
@@ -27,6 +33,10 @@ public protocol LocalNotificationCenter {
 extension UNUserNotificationCenter: LocalNotificationCenter {
     public func authorizationStatus() async -> UNAuthorizationStatus {
         await notificationSettings().authorizationStatus
+    }
+
+    public func deliveredNotificationRequests() async -> [UNNotificationRequest] {
+        await deliveredNotifications().map(\.request)
     }
 }
 
@@ -53,7 +63,26 @@ public final class NotificationService {
 
     private let center: LocalNotificationCenter
     private let bundle: Bundle
-    private var currentRequest: (token: UUID, attempt: UUID)?
+    private let instancePrefix = NotificationService.identifier + "." + UUID().uuidString + "."
+    private var latestIntent: UUID?
+    private var currentRequest: Submission?
+    private var inFlight: [String: Submission] = [:]
+    private var restoredDelivered: [String] = []
+
+    private enum Removal {
+        case pending, all
+    }
+
+    private final class Submission {
+        let token: UUID
+        let identifier: String
+        var removal: Removal?
+
+        init(token: UUID, identifier: String) {
+            self.token = token
+            self.identifier = identifier
+        }
+    }
 
     public init(center: LocalNotificationCenter, bundle: Bundle = .main) {
         self.center = center
@@ -84,13 +113,19 @@ public final class NotificationService {
 
     @discardableResult
     public func notify(_ token: UUID, workMinutes: Int = TimerConfiguration.defaults.workMinutes,
-                       canSnooze: Bool = true, stillCurrent: () -> Bool) async -> NotificationStatus {
-        let status = await status()
-        guard status == .allowed, stillCurrent(), token != currentRequest?.token else { return status }
-        cancelPending()
-        center.removeDeliveredNotifications(withIdentifiers: [Self.identifier])
-        let attempt = UUID()
-        currentRequest = (token, attempt)
+                       canSnooze: Bool = true, stillCurrent: () -> Bool) async
+        -> (authorization: NotificationStatus, submission: NotificationSubmissionState) {
+        let intent = UUID()
+        if !Task.isCancelled, stillCurrent(), token != currentRequest?.token { latestIntent = intent }
+        let permission = await status()
+        guard permission == .allowed, latestIntent == intent, !Task.isCancelled, stillCurrent(),
+              token != currentRequest?.token else { return (permission, .idle) }
+
+        clear()
+        // System removals are asynchronous. Never reuse an identifier across add attempts.
+        let submission = Submission(token: token, identifier: instancePrefix + UUID().uuidString)
+        currentRequest = submission
+        inFlight[submission.identifier] = submission
 
         let content = UNMutableNotificationContent()
         content.title = "该起来活动一下了！"
@@ -99,29 +134,94 @@ public final class NotificationService {
         content.userInfo = [Self.tokenKey: token.uuidString]
         content.sound = bundle.url(forResource: Self.soundName, withExtension: nil) == nil
             ? .default : UNNotificationSound(named: UNNotificationSoundName(Self.soundName))
-        let request = UNNotificationRequest(identifier: Self.identifier, content: content, trigger: nil)
+        let request = UNNotificationRequest(identifier: submission.identifier, content: content, trigger: nil)
         let error: Error? = await withCheckedContinuation { completion in
             center.add(request) { completion.resume(returning: $0) }
         }
-        if let error {
-            if currentRequest?.attempt == attempt { currentRequest = nil }
-            NSLog("StandUp notification: %@", error.localizedDescription)
+        inFlight.removeValue(forKey: submission.identifier)
+        if error != nil, currentRequest === submission { currentRequest = nil }
+        if let removal = submission.removal {
+            remove([submission.identifier], removal)
+            return (permission, .idle)
         }
-        return status
+        guard !Task.isCancelled, stillCurrent() else {
+            submission.removal = .all
+            remove([submission.identifier], .all)
+            return (permission, .idle)
+        }
+        if let error {
+            remove([submission.identifier], .all)
+            NSLog("StandUp notification: %@", error.localizedDescription)
+            let systemError = error as NSError
+            if systemError.domain == UNErrorDomain && systemError.code == UNError.Code.notificationsNotAllowed.rawValue {
+                return (.denied, .idle)
+            }
+            return (permission, .failed)
+        }
+        return (permission, .submitted)
     }
 
     public func cancelPending() {
-        // Removing a request from the system queue does not make the same reminder a new one.
-        center.removePendingNotificationRequests(withIdentifiers: [Self.identifier])
+        invalidate(.pending)
     }
 
     public func clear() {
-        cancelPending()
-        center.removeDeliveredNotifications(withIdentifiers: [Self.identifier])
+        invalidate(.all)
+    }
+
+    private func invalidate(_ removal: Removal) {
+        latestIntent = nil
+        var identifiers = Set(inFlight.keys)
+        for submission in inFlight.values where submission.removal != .all {
+            submission.removal = removal
+        }
+        if let currentRequest {
+            identifiers.insert(currentRequest.identifier)
+            if removal == .all { currentRequest.removal = .all }
+        }
+        identifiers.formUnion(restoredDelivered)
+        identifiers.insert(Self.identifier)
+        if removal == .all { restoredDelivered.removeAll() }
+        remove(Array(identifiers), removal)
+    }
+
+    private func remove(_ identifiers: [String], _ removal: Removal) {
+        guard !identifiers.isEmpty else { return }
+        center.removePendingNotificationRequests(withIdentifiers: identifiers)
+        if removal == .all { center.removeDeliveredNotifications(withIdentifiers: identifiers) }
+    }
+
+    public func cleanUpPreviousRequests(keepingDelivered: (UUID) -> Bool) async {
+        let pending = await center.pendingNotificationRequests().filter(isPreviousReminder)
+        guard !Task.isCancelled else { return }
+        remove(pending.map(\.identifier), .pending)
+        let delivered = await center.deliveredNotificationRequests().filter(isPreviousReminder)
+        guard !Task.isCancelled else { return }
+        let kept = delivered.filter { request in
+            currentRequest == nil && Self.token(for: request).map(keepingDelivered) == true
+        }.map(\.identifier)
+        restoredDelivered = kept
+        center.removeDeliveredNotifications(withIdentifiers: delivered.map(\.identifier).filter { !kept.contains($0) })
+    }
+
+    private func isPreviousReminder(_ request: UNNotificationRequest) -> Bool {
+        Self.isReminderIdentifier(request.identifier) && !request.identifier.hasPrefix(instancePrefix)
+    }
+
+    public func canPresent(_ request: UNNotificationRequest) -> Bool {
+        currentRequest?.identifier == request.identifier && currentRequest?.removal == nil
+    }
+
+    public func canHandle(_ request: UNNotificationRequest) -> Bool {
+        canPresent(request) || (currentRequest == nil && isPreviousReminder(request))
+    }
+
+    private nonisolated static func isReminderIdentifier(_ value: String) -> Bool {
+        value == identifier || value.hasPrefix(identifier + ".")
     }
 
     public nonisolated static func token(for request: UNNotificationRequest) -> UUID? {
-        guard request.identifier == identifier,
+        guard isReminderIdentifier(request.identifier),
               let value = request.content.userInfo[tokenKey] as? String else { return nil }
         return UUID(uuidString: value)
     }
