@@ -82,3 +82,57 @@ final class ConfigurationTests: XCTestCase {
         XCTAssertTrue(try store.load().settings.customPresets.isEmpty)
     }
 }
+
+extension ConfigurationTests {
+    func testDisabledGlobalScheduleAllowsInvalidDailyRanges() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = PersistenceService(url: directory.appendingPathComponent("state.json"))
+        var data = LocalData()
+        var schedule = data.settings.schedule
+        schedule.enabled = false
+        let monday = DaySchedule(startMinute: 1320, endMinute: 120)
+        schedule[.monday] = monday
+        schedule[.saturday] = DaySchedule(allDay: true)
+
+        XCTAssertFalse(monday.isValid)
+        XCTAssertTrue(data.settings.applySchedule(schedule))
+        try store.save(data)
+        let loaded = try store.load()
+        XCTAssertEqual(loaded.schemaVersion, 2)
+        XCTAssertEqual(loaded.settings.schedule, schedule)
+        XCTAssertEqual(loaded.settings.schedule[.monday], monday)
+    }
+
+    func testReenablingGlobalScheduleRequiresValidDailyRanges() {
+        var settings = AppSettings()
+        var schedule = settings.schedule
+        schedule.enabled = false
+        schedule[.monday].endMinute = schedule[.monday].startMinute
+        XCTAssertTrue(settings.applySchedule(schedule))
+
+        schedule.enabled = true
+        XCTAssertFalse(settings.applySchedule(schedule))
+        XCTAssertFalse(settings.schedule.enabled)
+        XCTAssertEqual(settings.schedule[.monday], schedule[.monday])
+
+        schedule[.monday].endMinute = 22 * 60
+        XCTAssertTrue(settings.applySchedule(schedule))
+        XCTAssertTrue(settings.schedule.enabled)
+    }
+
+    func testDisabledGlobalScheduleStillRejectsOutOfRangeMinutes() {
+        var settings = AppSettings()
+        var schedule = settings.schedule
+        schedule.enabled = false
+        schedule[.monday].startMinute = -1
+        XCTAssertFalse(settings.applySchedule(schedule))
+        schedule[.monday].startMinute = 0
+        schedule[.monday].endMinute = 1440
+        XCTAssertFalse(settings.applySchedule(schedule))
+        XCTAssertEqual(settings.schedule, .defaults)
+
+        schedule[.monday].endMinute = 1439
+        XCTAssertTrue(settings.applySchedule(schedule))
+    }
+}

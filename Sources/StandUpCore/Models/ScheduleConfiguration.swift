@@ -35,8 +35,12 @@ public struct DaySchedule: Codable, Equatable {
                   allDay: try values.decodeIfPresent(Bool.self, forKey: .allDay) ?? false)
     }
 
+    fileprivate var hasValidMinutes: Bool {
+        (0..<1440).contains(startMinute) && (0..<1440).contains(endMinute)
+    }
+
     public var isValid: Bool {
-        guard (0..<1440).contains(startMinute), (0..<1440).contains(endMinute) else { return false }
+        guard hasValidMinutes else { return false }
         return !enabled || allDay || startMinute < endMinute || (allowsOvernight && startMinute > endMinute)
     }
 }
@@ -61,7 +65,9 @@ public struct ScheduleConfiguration: Codable, Equatable {
         set { days[day] = newValue }
     }
 
-    public var isValid: Bool { Weekday.allCases.allSatisfy { self[$0].isValid } }
+    public var isValid: Bool {
+        Weekday.allCases.allSatisfy { enabled ? self[$0].isValid : self[$0].hasValidMinutes }
+    }
 
     public static func == (lhs: Self, rhs: Self) -> Bool {
         lhs.enabled == rhs.enabled && Weekday.allCases.allSatisfy { lhs[$0] == rhs[$0] }

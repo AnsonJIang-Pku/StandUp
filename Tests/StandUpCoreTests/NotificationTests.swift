@@ -5,19 +5,27 @@ import XCTest
 @testable import StandUpCore
 
 @MainActor
-private final class MockNotificationCenter: LocalNotificationCenter {
+final class MockNotificationCenter: LocalNotificationCenter {
     var permission = UNAuthorizationStatus.authorized
     var categories: Set<UNNotificationCategory> = []
     var requestedOptions: UNAuthorizationOptions = []
     var pending: [String: UNNotificationRequest] = [:]
     var delivered: Set<String> = []
     var additions = 0
+    var authorization: (() async -> UNAuthorizationStatus)?
+    var onAdd: (() -> Void)?
+    var addError: Error?
+    var deferCompletions = false
+    private var submissions: [(UNNotificationRequest, ((Error?) -> Void)?)] = []
 
     func setNotificationCategories(_ categories: Set<UNNotificationCategory>) {
         self.categories = categories
     }
 
-    func authorizationStatus() async -> UNAuthorizationStatus { permission }
+    func authorizationStatus() async -> UNAuthorizationStatus {
+        if let authorization { return await authorization() }
+        return permission
+    }
 
     func requestAuthorization(options: UNAuthorizationOptions) async throws -> Bool {
         requestedOptions = options
@@ -25,9 +33,16 @@ private final class MockNotificationCenter: LocalNotificationCenter {
     }
 
     func add(_ request: UNNotificationRequest, withCompletionHandler handler: ((Error?) -> Void)?) {
-        pending[request.identifier] = request
         additions += 1
-        handler?(nil)
+        submissions.append((request, handler))
+        if !deferCompletions { completeSubmission(at: submissions.count - 1, error: addError) }
+        onAdd?()
+    }
+
+    func completeSubmission(at index: Int, error: Error? = nil) {
+        let (request, handler) = submissions.remove(at: index)
+        if error == nil { pending[request.identifier] = request }
+        handler?(error)
     }
 
     func removePendingNotificationRequests(withIdentifiers identifiers: [String]) {
@@ -131,6 +146,77 @@ final class NotificationTests: XCTestCase {
         await service.notify(UUID()) { false }
         XCTAssertTrue(center.pending.isEmpty)
         XCTAssertEqual(center.additions, 0)
+    }
+
+    @MainActor
+    func testFailedNotificationCanRetrySameToken() async {
+        let center = MockNotificationCenter()
+        let service = NotificationService(center: center)
+        let token = UUID()
+        center.addError = CocoaError(.fileWriteUnknown)
+
+        await service.notify(token) { true }
+        XCTAssertEqual(center.additions, 1)
+        XCTAssertEqual(center.pending.count, 0)
+
+        center.addError = nil
+        await service.notify(token) { true }
+        XCTAssertEqual(center.additions, 2)
+        XCTAssertEqual(center.pending.count, 1)
+        XCTAssertEqual(center.pending.values.first.flatMap(NotificationService.token(for:)), token)
+    }
+
+    @MainActor
+    func testSuccessfulNotificationIsStillDeduplicated() async {
+        let center = MockNotificationCenter()
+        let service = NotificationService(center: center)
+        let token = UUID()
+
+        await service.notify(token) { true }
+        await service.notify(token) { true }
+        XCTAssertEqual(center.additions, 1)
+        XCTAssertEqual(center.pending.count, 1)
+
+        service.cancelPending()
+        service.clear()
+        await service.notify(token) { true }
+        XCTAssertEqual(center.additions, 1)
+        XCTAssertEqual(center.pending.count, 0)
+    }
+
+    @MainActor
+    func testStaleFailureCallbackDoesNotClearNewerToken() async {
+        let center = MockNotificationCenter()
+        let service = NotificationService(center: center)
+        let oldToken = UUID()
+        let newToken = UUID()
+        center.deferCompletions = true
+
+        let oldAdded = expectation(description: "Old request added")
+        center.onAdd = { oldAdded.fulfill() }
+        let old = Task { await service.notify(oldToken) { true } }
+        await fulfillment(of: [oldAdded], timeout: 3)
+
+        let newAdded = expectation(description: "New request added")
+        center.onAdd = { newAdded.fulfill() }
+        let new = Task { await service.notify(newToken) { true } }
+        await fulfillment(of: [newAdded], timeout: 3)
+        center.onAdd = nil
+        XCTAssertEqual(center.additions, 2)
+        XCTAssertEqual(center.pending.count, 0)
+
+        center.deferCompletions = false
+        await service.notify(newToken) { true }
+        XCTAssertEqual(center.additions, 2, "A submission in progress must be deduplicated too")
+        center.completeSubmission(at: 1)
+        _ = await new.value
+        center.completeSubmission(at: 0, error: CocoaError(.fileWriteUnknown))
+        _ = await old.value
+
+        await service.notify(newToken) { true }
+        XCTAssertEqual(center.additions, 2)
+        XCTAssertEqual(center.pending.count, 1)
+        XCTAssertEqual(center.pending.values.first.flatMap(NotificationService.token(for:)), newToken)
     }
 
     @MainActor

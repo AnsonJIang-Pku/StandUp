@@ -23,7 +23,7 @@ final class AppModel: ObservableObject {
     @Published private var loginError: String?
     @Published private(set) var storageError: String?
 
-    init(persistence: PersistenceService = .standard, center: UNUserNotificationCenter = .current(),
+    init(persistence: PersistenceService = .standard, center: LocalNotificationCenter = UNUserNotificationCenter.current(),
          now: @escaping () -> Date = { Date() }) {
         self.persistence = persistence
         self.notifications = NotificationService(center: center)
@@ -36,7 +36,7 @@ final class AppModel: ObservableObject {
         } catch {
             data = LocalData()
             canSave = false
-            storageError = "无法读取本地数据。重新启动后可重试。"
+            storageError = "无法读取本地数据。计时仍可继续，退出或重启后可能无法恢复当前状态。"
         }
         self.lastSaved = data
         self.session = TimerSession(data: data, now: now)
@@ -130,7 +130,7 @@ final class AppModel: ObservableObject {
                 Task { [weak self] in
                     guard let self else { return }
                     notificationStatus = await notifications.notify(id, workMinutes: workMinutes, canSnooze: canSnooze) {
-                        self.lastSaved.timer == self.engine.snapshot && self.isCurrentReminder(id)
+                        self.isCurrentReminder(id)
                     }
                 }
             case .record:
@@ -203,7 +203,7 @@ final class AppModel: ObservableObject {
             storageError = nil
             return true
         } catch {
-            storageError = "无法保存本地数据。计时仍可继续。"
+            storageError = "无法保存本地数据。计时仍可继续，退出或重启后可能无法恢复当前状态。"
             NSLog("StandUp persistence: %@", error.localizedDescription)
             return false
         }

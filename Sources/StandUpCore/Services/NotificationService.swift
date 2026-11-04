@@ -53,7 +53,7 @@ public final class NotificationService {
 
     private let center: LocalNotificationCenter
     private let bundle: Bundle
-    private var currentRequest: UUID?
+    private var currentRequest: (token: UUID, attempt: UUID)?
 
     public init(center: LocalNotificationCenter, bundle: Bundle = .main) {
         self.center = center
@@ -86,10 +86,11 @@ public final class NotificationService {
     public func notify(_ token: UUID, workMinutes: Int = TimerConfiguration.defaults.workMinutes,
                        canSnooze: Bool = true, stillCurrent: () -> Bool) async -> NotificationStatus {
         let status = await status()
-        guard status == .allowed, stillCurrent(), token != currentRequest else { return status }
+        guard status == .allowed, stillCurrent(), token != currentRequest?.token else { return status }
         cancelPending()
         center.removeDeliveredNotifications(withIdentifiers: [Self.identifier])
-        currentRequest = token
+        let attempt = UUID()
+        currentRequest = (token, attempt)
 
         let content = UNMutableNotificationContent()
         content.title = "该起来活动一下了！"
@@ -98,13 +99,19 @@ public final class NotificationService {
         content.userInfo = [Self.tokenKey: token.uuidString]
         content.sound = bundle.url(forResource: Self.soundName, withExtension: nil) == nil
             ? .default : UNNotificationSound(named: UNNotificationSoundName(Self.soundName))
-        center.add(UNNotificationRequest(identifier: Self.identifier, content: content, trigger: nil)) { error in
-            if let error { NSLog("StandUp notification: %@", error.localizedDescription) }
+        let request = UNNotificationRequest(identifier: Self.identifier, content: content, trigger: nil)
+        let error: Error? = await withCheckedContinuation { completion in
+            center.add(request) { completion.resume(returning: $0) }
+        }
+        if let error {
+            if currentRequest?.attempt == attempt { currentRequest = nil }
+            NSLog("StandUp notification: %@", error.localizedDescription)
         }
         return status
     }
 
     public func cancelPending() {
+        // Removing a request from the system queue does not make the same reminder a new one.
         center.removePendingNotificationRequests(withIdentifiers: [Self.identifier])
     }
 
