@@ -193,6 +193,120 @@ final class AppModelNotificationTests: XCTestCase {
     }
 
     @MainActor
+    func testStartupResubmitsReminderWhenNoSystemRequestExists() async throws {
+        let fixture = try StartupFixture(clock: makeClock())
+        defer { fixture.close() }
+        let added = expectation(description: "Missing reminder submitted")
+        fixture.center.onAdd = { added.fulfill() }
+        fixture.model.start()
+        let cleanup = try XCTUnwrap(fixture.model.notificationCleanupTask)
+        await cleanup.value
+        await fulfillment(of: [added], timeout: 3)
+        await fixture.model.notificationTask?.value
+
+        XCTAssertEqual(fixture.center.additions, 1)
+        XCTAssertEqual(fixture.center.pending.count, 1)
+        XCTAssertEqual(fixture.center.pending.values.first.flatMap(NotificationService.token(for:)), fixture.token)
+        XCTAssertEqual(fixture.model.state, .breakDue)
+        XCTAssertEqual(fixture.model.stageID, fixture.token)
+        fixture.model.send(.refresh)
+        XCTAssertNil(fixture.model.notificationTask)
+        XCTAssertEqual(fixture.center.additions, 1)
+    }
+
+    @MainActor
+    func testStartupRestoresPendingReminderAndRoutesActions() async throws {
+        for (action, expected) in [("STANDUP_START_BREAK", TimerState.onBreak),
+                                   ("STANDUP_SNOOZE", .snoozed), ("STANDUP_SKIP", .working)] {
+            let fixture = try StartupFixture(clock: makeClock())
+            defer { fixture.close() }
+            let request = NotificationTests.request(NotificationService.identifier + ".old.pending", token: fixture.token)
+            fixture.center.pending[request.identifier] = request
+            fixture.model.start()
+            XCTAssertTrue(fixture.model.canPresentReminder(request))
+            let cleanup = try XCTUnwrap(fixture.model.notificationCleanupTask)
+            await cleanup.value
+
+            XCTAssertEqual(Set(fixture.center.pending.keys), [request.identifier])
+            XCTAssertEqual(fixture.center.additions, 0)
+            XCTAssertTrue(fixture.model.canPresentReminder(request))
+            fixture.model.handleReminderAction(action, request: request)
+            XCTAssertEqual(fixture.model.state, expected)
+            XCTAssertFalse(fixture.model.canPresentReminder(request))
+            XCTAssertTrue(fixture.center.pending.isEmpty)
+            fixture.model.handleReminderAction("STANDUP_START_BREAK", request: request)
+            XCTAssertEqual(fixture.model.state, expected)
+        }
+    }
+
+    @MainActor
+    func testStartupKeepsDeliveredReminderWithoutResubmission() async throws {
+        let fixture = try StartupFixture(clock: makeClock())
+        defer { fixture.close() }
+        let request = NotificationTests.request(NotificationService.identifier, token: fixture.token)
+        fixture.center.delivered[request.identifier] = request
+        fixture.model.start()
+        let cleanup = try XCTUnwrap(fixture.model.notificationCleanupTask)
+        await cleanup.value
+
+        XCTAssertEqual(Set(fixture.center.delivered.keys), [request.identifier])
+        XCTAssertEqual(fixture.center.additions, 0)
+        XCTAssertNil(fixture.model.notificationTask)
+        XCTAssertEqual(fixture.model.state, .breakDue)
+    }
+
+    @MainActor
+    func testLaunchEffectWaitsForCleanupAndSubmitsOnlyOnce() async throws {
+        let fixture = try StartupFixture(clock: makeClock(), savedBreakDue: false)
+        defer { fixture.close() }
+        let lookupStarted = expectation(description: "Startup lookup is suspended")
+        var resumeLookup: CheckedContinuation<Void, Never>?
+        fixture.center.beforeDeliveredLookup = {
+            await withCheckedContinuation {
+                resumeLookup = $0
+                lookupStarted.fulfill()
+            }
+        }
+        fixture.model.start()
+        let cleanup = try XCTUnwrap(fixture.model.notificationCleanupTask)
+        let submission = try XCTUnwrap(fixture.model.notificationTask)
+        await fulfillment(of: [lookupStarted], timeout: 3)
+        XCTAssertEqual(fixture.model.state, .breakDue)
+        XCTAssertEqual(fixture.center.additions, 0)
+        try XCTUnwrap(resumeLookup).resume()
+        await cleanup.value
+        await submission.value
+
+        XCTAssertEqual(fixture.center.additions, 1)
+        XCTAssertEqual(fixture.center.pending.count, 1)
+        XCTAssertEqual(fixture.center.pending.values.first.flatMap(NotificationService.token(for:)), fixture.model.stageID)
+    }
+
+    @MainActor
+    private final class StartupFixture {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let center = MockNotificationCenter()
+        let token: UUID
+        let model: AppModel
+
+        init(clock: TestClock, savedBreakDue: Bool = true) throws {
+            let store = PersistenceService(url: directory.appendingPathComponent("state.json"))
+            let session = TimerSession(now: { clock.now })
+            session.handle(.startWork)
+            clock.advance(1800)
+            if savedBreakDue { session.handle(.refresh) }
+            token = try XCTUnwrap(session.engine.snapshot.stage?.id)
+            try store.save(session.data)
+            model = AppModel(persistence: store, center: center, now: { clock.now })
+        }
+
+        func close() {
+            model.shutdown()
+            try? FileManager.default.removeItem(at: directory)
+        }
+    }
+
+    @MainActor
     private func checkRetryInterrupted(_ interrupt: (RetryFixture) -> Void) async throws {
         let fixture = makeRetryFixture()
         defer { fixture.close() }

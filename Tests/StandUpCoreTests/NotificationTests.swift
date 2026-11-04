@@ -14,6 +14,7 @@ final class MockNotificationCenter: LocalNotificationCenter {
     var additions = 0
     var authorization: (() async -> UNAuthorizationStatus)?
     var onAdd: (() -> Void)?
+    var beforeDeliveredLookup: (() async -> Void)?
     var addError: Error?
     var deferCompletions = false
     private var submissions: [(UNNotificationRequest, ((Error?) -> Void)?)] = []
@@ -53,7 +54,10 @@ final class MockNotificationCenter: LocalNotificationCenter {
 
     func pendingNotificationRequests() async -> [UNNotificationRequest] { Array(pending.values) }
 
-    func deliveredNotificationRequests() async -> [UNNotificationRequest] { Array(delivered.values) }
+    func deliveredNotificationRequests() async -> [UNNotificationRequest] {
+        await beforeDeliveredLookup?()
+        return Array(delivered.values)
+    }
 
     func removePendingNotificationRequests(withIdentifiers identifiers: [String]) {
         for id in identifiers { pending.removeValue(forKey: id) }
@@ -332,6 +336,126 @@ final class NotificationTests: XCTestCase {
         XCTAssertTrue(center.delivered.values.allSatisfy(service.canHandle))
         service.clear()
         XCTAssertTrue(center.delivered.isEmpty)
+    }
+
+    @MainActor
+    func testStartupPreservesCurrentPendingReminder() async throws {
+        let center = MockNotificationCenter()
+        let token = UUID()
+        let previous = NotificationService(center: center)
+        await previous.notify(token) { true }
+        let request = try XCTUnwrap(center.pending.values.first)
+        let service = NotificationService(center: center)
+
+        await service.cleanUpPreviousRequests { $0 == token }
+
+        XCTAssertEqual(Set(center.pending.keys), [request.identifier])
+        XCTAssertTrue(service.hasRestoredReminder(token))
+        XCTAssertTrue(service.canPresent(request))
+        XCTAssertTrue(service.canHandle(request))
+        await service.notify(token) { true }
+        XCTAssertEqual(center.additions, 1)
+        XCTAssertEqual(Set(center.pending.keys), [request.identifier])
+    }
+
+    @MainActor
+    func testStartupRemovesStalePendingReminders() async {
+        let center = MockNotificationCenter()
+        let token = UUID()
+        let prefix = NotificationService.identifier + ".old."
+        let current = Self.request(prefix + "current", token: token)
+        let stale = Self.request(prefix + "stale", token: UUID())
+        let staleLegacy = Self.request(NotificationService.identifier, token: UUID())
+        let malformed = Self.request(prefix + "malformed", token: nil)
+        let unrelated = Self.request("unrelated.reminder", token: token)
+        for request in [current, stale, staleLegacy, malformed, unrelated] {
+            center.pending[request.identifier] = request
+        }
+        let service = NotificationService(center: center)
+
+        await service.cleanUpPreviousRequests { $0 == token }
+
+        XCTAssertEqual(Set(center.pending.keys), [current.identifier, unrelated.identifier])
+        for request in [stale, staleLegacy, malformed, unrelated] {
+            XCTAssertFalse(service.canPresent(request))
+            XCTAssertFalse(service.canHandle(request))
+        }
+    }
+
+    @MainActor
+    func testStartupCleanupAndLateOldCompletionDoNotRemoveNewSubmission() async throws {
+        let center = MockNotificationCenter()
+        let previous = NotificationService(center: center)
+        let oldToken = UUID()
+        let oldSubmission = await beginDeferredSubmission(oldToken, service: previous, center: center)
+        previous.clear()
+        let stale = Self.request(NotificationService.identifier + ".old.stale", token: UUID())
+        center.pending[stale.identifier] = stale
+
+        let lookupStarted = expectation(description: "Startup lookup is suspended")
+        var resumeLookup: CheckedContinuation<Void, Never>?
+        center.beforeDeliveredLookup = {
+            await withCheckedContinuation {
+                resumeLookup = $0
+                lookupStarted.fulfill()
+            }
+        }
+        let service = NotificationService(center: center)
+        let newToken = UUID()
+        let cleanup = Task { await service.cleanUpPreviousRequests { $0 == newToken } }
+        await fulfillment(of: [lookupStarted], timeout: 3)
+        center.deferCompletions = false
+        let result = await service.notify(newToken) { true }
+        XCTAssertEqual(result.submission, .submitted)
+        let newRequest = try XCTUnwrap(center.pending.values.first {
+            NotificationService.token(for: $0) == newToken
+        })
+        // Both requests reach the delivered queue before startup takes its second snapshot.
+        center.pending[newRequest.identifier] = nil
+        center.delivered[newRequest.identifier] = newRequest
+        center.pending[stale.identifier] = nil
+        center.delivered[stale.identifier] = stale
+        try XCTUnwrap(resumeLookup).resume()
+        await cleanup.value
+
+        center.completeSubmission(at: 0, deliveredImmediately: true)
+        _ = await oldSubmission.value
+        XCTAssertEqual(center.additions, 2)
+        XCTAssertTrue(center.pending.isEmpty)
+        XCTAssertEqual(Set(center.delivered.keys), [newRequest.identifier])
+        XCTAssertTrue(service.canPresent(newRequest))
+        XCTAssertTrue(service.canHandle(newRequest))
+    }
+
+    @MainActor
+    func testCancellationSemanticsForRestoredNotifications() async {
+        let center = MockNotificationCenter()
+        let token = UUID()
+        let pending = Self.request(NotificationService.identifier + ".old.pending", token: token)
+        let delivered = Self.request(NotificationService.identifier + ".old.delivered", token: token)
+        center.pending[pending.identifier] = pending
+        center.delivered[delivered.identifier] = delivered
+        let service = NotificationService(center: center)
+        await service.cleanUpPreviousRequests { $0 == token }
+
+        service.cancelPending()
+        XCTAssertTrue(center.pending.isEmpty)
+        XCTAssertEqual(Set(center.delivered.keys), [delivered.identifier])
+        XCTAssertTrue(service.canHandle(delivered))
+
+        // Simulate the request reaching the queue after pending cancellation.
+        center.pending[pending.identifier] = pending
+        service.clear()
+        XCTAssertTrue(center.pending.isEmpty)
+        XCTAssertTrue(center.delivered.isEmpty)
+        XCTAssertFalse(service.canHandle(delivered))
+        XCTAssertFalse(service.hasRestoredReminder(token))
+    }
+
+    static func request(_ identifier: String, token: UUID?) -> UNNotificationRequest {
+        let content = UNMutableNotificationContent()
+        if let token { content.userInfo = ["reminderID": token.uuidString] }
+        return UNNotificationRequest(identifier: identifier, content: content, trigger: nil)
     }
 
     @MainActor

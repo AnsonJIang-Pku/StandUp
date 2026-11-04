@@ -13,7 +13,7 @@ final class AppModel: ObservableObject {
     private let now: () -> Date
     private let notificationRetryDelay: () async throws -> Void
     private(set) var notificationTask: Task<Void, Never>?
-    private var notificationCleanupTask: Task<Void, Never>?
+    private(set) var notificationCleanupTask: Task<Void, Never>?
     private let canSave: Bool
     private var lastSaved: LocalData
     private var deadlineTimer: Timer?
@@ -89,14 +89,19 @@ final class AppModel: ObservableObject {
         running = true
         notifications.register()
         sleepWake.start { [weak self] event in self?.send(event) }
-        notifications.cancelPending()
-        if state != .breakDue { notifications.clear() }
-        send(.applicationLaunched)
-        refreshSystemSettings()
         notificationCleanupTask = Task { [weak self] in
             guard let self else { return }
-            await notifications.cleanUpPreviousRequests(keepingDelivered: isCurrentReminder)
+            await notifications.cleanUpPreviousRequests(keeping: isCurrentReminder)
+            guard !Task.isCancelled else { return }
+            notificationCleanupTask = nil
+            if notificationTask == nil, let id = stageID, isCurrentReminder(id),
+               !notifications.hasRestoredReminder(id) {
+                submitReminder(id, attemptLimit: 2)
+            }
         }
+        // This synchronous event restores the engine before the main-actor cleanup task can run.
+        send(.applicationLaunched)
+        refreshSystemSettings()
     }
 
     func shutdown() {
@@ -105,6 +110,7 @@ final class AppModel: ObservableObject {
         ticker?.cancel()
         sleepWake.stop()
         notificationCleanupTask?.cancel()
+        notificationCleanupTask = nil
         cancelNotificationSubmission()
         notifications.cancelPending()
         saveIfNeeded()
@@ -171,6 +177,7 @@ final class AppModel: ObservableObject {
         notificationSubmission = .submitting
         let workMinutes = activeConfiguration.workMinutes
         let canSnooze = self.canSnooze
+        let startupCleanup = notificationCleanupTask
         notificationTask = Task { [weak self] in
             guard let self else { return }
             defer {
@@ -179,6 +186,7 @@ final class AppModel: ObservableObject {
                     notificationTask = nil
                 }
             }
+            await startupCleanup?.value
             for attempt in 1...attemptLimit {
                 guard !Task.isCancelled, isCurrentReminder(id) else { return }
                 let result = await notifications.notify(id, workMinutes: workMinutes, canSnooze: canSnooze) {

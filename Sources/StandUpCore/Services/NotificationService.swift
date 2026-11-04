@@ -67,7 +67,8 @@ public final class NotificationService {
     private var latestIntent: UUID?
     private var currentRequest: Submission?
     private var inFlight: [String: Submission] = [:]
-    private var restoredDelivered: [String] = []
+    // nil until startup reconciliation finishes or a clear invalidates historical requests.
+    private var restoredRequests: [String: UUID]?
 
     private enum Removal {
         case pending, all
@@ -116,10 +117,12 @@ public final class NotificationService {
                        canSnooze: Bool = true, stillCurrent: () -> Bool) async
         -> (authorization: NotificationStatus, submission: NotificationSubmissionState) {
         let intent = UUID()
-        if !Task.isCancelled, stillCurrent(), token != currentRequest?.token { latestIntent = intent }
+        if !Task.isCancelled, stillCurrent(), token != currentRequest?.token, !hasRestoredReminder(token) {
+            latestIntent = intent
+        }
         let permission = await status()
         guard permission == .allowed, latestIntent == intent, !Task.isCancelled, stillCurrent(),
-              token != currentRequest?.token else { return (permission, .idle) }
+              token != currentRequest?.token, !hasRestoredReminder(token) else { return (permission, .idle) }
 
         clear()
         // System removals are asynchronous. Never reuse an identifier across add attempts.
@@ -179,9 +182,9 @@ public final class NotificationService {
             identifiers.insert(currentRequest.identifier)
             if removal == .all { currentRequest.removal = .all }
         }
-        identifiers.formUnion(restoredDelivered)
+        if let restoredRequests { identifiers.formUnion(restoredRequests.keys) }
         identifiers.insert(Self.identifier)
-        if removal == .all { restoredDelivered.removeAll() }
+        if removal == .all { restoredRequests = [:] }
         remove(Array(identifiers), removal)
     }
 
@@ -191,29 +194,48 @@ public final class NotificationService {
         if removal == .all { center.removeDeliveredNotifications(withIdentifiers: identifiers) }
     }
 
-    public func cleanUpPreviousRequests(keepingDelivered: (UUID) -> Bool) async {
+    public func cleanUpPreviousRequests(keeping isCurrent: (UUID) -> Bool) async {
+        // Read pending first so a request moving to delivered during the lookup can still be found.
         let pending = await center.pendingNotificationRequests().filter(isPreviousReminder)
         guard !Task.isCancelled else { return }
-        remove(pending.map(\.identifier), .pending)
         let delivered = await center.deliveredNotificationRequests().filter(isPreviousReminder)
         guard !Task.isCancelled else { return }
-        let kept = delivered.filter { request in
-            currentRequest == nil && Self.token(for: request).map(keepingDelivered) == true
-        }.map(\.identifier)
-        restoredDelivered = kept
-        center.removeDeliveredNotifications(withIdentifiers: delivered.map(\.identifier).filter { !kept.contains($0) })
+
+        let previous = pending + delivered
+        var kept: [String: UUID] = [:]
+        for request in previous {
+            if canUsePreviousReminder(request), let token = Self.token(for: request), isCurrent(token) {
+                kept[request.identifier] = token
+            }
+        }
+        restoredRequests = kept
+        // A stale pending request may already have moved to the delivered queue.
+        let obsolete = Set(previous.map(\.identifier).filter { kept[$0] == nil })
+        remove(Array(obsolete), .all)
+    }
+
+    public func hasRestoredReminder(_ token: UUID) -> Bool {
+        restoredRequests?.values.contains(token) == true
     }
 
     private func isPreviousReminder(_ request: UNNotificationRequest) -> Bool {
         Self.isReminderIdentifier(request.identifier) && !request.identifier.hasPrefix(instancePrefix)
     }
 
+    private func canUsePreviousReminder(_ request: UNNotificationRequest) -> Bool {
+        // The app also validates the token, including for a notification delivered during startup.
+        guard currentRequest == nil, isPreviousReminder(request),
+              let token = Self.token(for: request) else { return false }
+        return restoredRequests == nil || restoredRequests?[request.identifier] == token
+    }
+
     public func canPresent(_ request: UNNotificationRequest) -> Bool {
-        currentRequest?.identifier == request.identifier && currentRequest?.removal == nil
+        (currentRequest?.identifier == request.identifier && currentRequest?.removal == nil)
+            || canUsePreviousReminder(request)
     }
 
     public func canHandle(_ request: UNNotificationRequest) -> Bool {
-        canPresent(request) || (currentRequest == nil && isPreviousReminder(request))
+        canPresent(request)
     }
 
     private nonisolated static func isReminderIdentifier(_ value: String) -> Bool {

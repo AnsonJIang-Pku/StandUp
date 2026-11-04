@@ -4,12 +4,12 @@
 
 ## 自动化测试
 
-`swift test` 实际执行 **82 项，82 项通过，0 项失败**。包含 1.1.1 的 68 项测试，以及本次新增的 14 项。通知测试使用可控回调和退避，计时用例使用可控时钟。
+`swift test` 实际执行 **90 项，90 项通过，0 项失败**。包含远端基线的 82 项及新增的 8 项重启恢复测试。两组通知测试共 34 项，额外连续运行三轮均通过。测试使用可控回调、退避和时钟。
 
 | 测试组 | 通过 | 验证内容 |
 | --- | ---: | --- |
-| NotificationTests | 14 | 延迟成功后的队列清理、跨请求成功或失败回调乱序、提交中及成功后去重、失败可重试、取消保留已送达项、启动清理、通知内容与提示音资源 |
-| AppModelNotificationTests | 12 | 保存成功或失败时提交、等待权限时作废、单次自动重试、连续失败和手动重发、停止、暂停、过期或退出取消重试、权限拒绝或撤销、阻止已失效的通知展示和操作 |
+| NotificationTests | 18 | 保留有效的待发送和已送达提醒，删除过期提醒，隔离启动清理与迟到回调，保留取消语义、去重与失败重试 |
+| AppModelNotificationTests | 16 | 缺失提醒只补发一次，恢复提醒可展示并处理三种操作，启动提交等待队列核对，以及原有的保存失败、权限和重试回归 |
 | ConfigurationTests | 8 | 参数校验、预设、关闭全局日程时保存草稿 |
 | MigrationTests | 4 | 1.0 备份及迁移、默认值、损坏数据及较新版本保护 |
 | PersistenceTests | 6 | 会话截止时间、设置、损坏数据、计数去重 |
@@ -22,8 +22,8 @@
 
 - Xcode Universal Release 构建成功。包内包含 arm64 和 x86_64，两者最低系统版本均为 macOS 13.0。
 - `codesign --verify --deep --strict` 通过，应用为本地 ad-hoc 签名。
-- 远端 `main` 基线为 1.1.1 的 `acc82cc09ccdc336043575f6590c5acd66729ea2`，macOS CI 已通过。本报告记录 1.1.2 的本地验证。远端检查记录见 [macOS CI](https://github.com/AnsonJIang-Pku/StandUp/actions/workflows/macos.yml)。[基线 CI 运行](https://github.com/AnsonJIang-Pku/StandUp/actions/runs/41794002841)
+- 远端 `main` 的 1.1.2 基线 `b0b5766` 已通过 macOS CI。此次重启恢复补丁在本地验证。[基线 CI 运行](https://github.com/AnsonJIang-Pku/StandUp/actions/runs/41814240415)
 
 ## 实机验证边界
 
-竞态测试验证的是模拟通知中心的最终待发送和已送达队列。实际横幅、提示音、锁屏通知、通知中心移除时序和整机睡眠唤醒仍待实机确认。
+竞态测试验证的是模拟通知中心的最终待发送和已送达队列，以及应用对恢复通知的展示和操作判断。实际横幅、提示音、锁屏、macOS 通知跨进程交付和整机睡眠唤醒仍待实机确认。
