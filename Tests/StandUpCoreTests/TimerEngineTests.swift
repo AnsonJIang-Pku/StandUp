@@ -64,10 +64,42 @@ final class TimerEngineTests: XCTestCase {
         XCTAssertEqual(engine.handle(.startBreak(due)), [])
         let activity = engine.snapshot.stage!.id
         clock.advance(180)
-        XCTAssertEqual(engine.handle(.refresh), [.record(.activity(seconds: 180), activity, clock.now)])
+        XCTAssertEqual(engine.handle(.refresh), [
+            .record(.activity(seconds: 180), activity, clock.now), .activityFinished(startedNextWork: true)
+        ])
         XCTAssertEqual(engine.state, .working)
         XCTAssertEqual(engine.remaining(at: clock.now), 1800)
         XCTAssertEqual(engine.handle(.refresh), [])
+    }
+
+    func testActivityCompletionWithoutAutoStartReturnsToIdleAndAnnouncesOnce() {
+        var configuration = TimerConfiguration.defaults
+        configuration.autoStartNextWork = false
+        engine.updateConfiguration(configuration)
+        engine.handle(.startBreak(reachDue()))
+        let activity = engine.snapshot.stage!.id
+        clock.advance(180)
+
+        XCTAssertEqual(engine.handle(.refresh), [
+            .record(.activity(seconds: 180), activity, clock.now), .activityFinished(startedNextWork: false)
+        ])
+        XCTAssertEqual(engine.state, .idle)
+        XCTAssertEqual(engine.handle(.refresh), [])
+    }
+
+    func testManualSessionEndAndLaunchCatchUpDoNotAnnounceElapsedActivity() {
+        for event in [TimerEvent.stop, .restart, .applicationLaunched, .systemWillSleep] {
+            engine.handle(.restart)
+            clock.advance(1800)
+            engine.handle(.refresh)
+            engine.handle(.startBreak(engine.snapshot.stage!.id))
+            let activity = engine.snapshot.stage!.id
+            clock.advance(180)
+
+            let effects = engine.handle(event)
+            XCTAssertTrue(effects.contains(.record(.activity(seconds: 180), activity, clock.now)))
+            XCTAssertFalse(effects.contains(.activityFinished(startedNextWork: true)))
+        }
     }
 
     func testSnoozeCanRepeatAndOldActionsAreIgnored() {

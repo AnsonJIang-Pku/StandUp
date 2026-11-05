@@ -7,6 +7,47 @@ import StandUpCore
 
 final class AppModelNotificationTests: XCTestCase {
     @MainActor
+    func testEnabledActivityCompletionSubmitsOnceAndCanPresentInForeground() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let store = PersistenceService(url: directory.appendingPathComponent("state.json"))
+        let center = MockNotificationCenter()
+        let clock = makeClock()
+        let model = AppModel(persistence: store, center: center, now: { clock.now })
+        let defaults = UserDefaults.standard
+        let key = ReminderSounds.activityEndSoundKey
+        let previous = defaults.object(forKey: key)
+        defer {
+            defaults.set(previous, forKey: key)
+            model.shutdown()
+            try? FileManager.default.removeItem(at: directory)
+        }
+        defaults.set(true, forKey: key)
+        model.start()
+        model.send(.startWork)
+        clock.advance(1800)
+        model.send(.refresh)
+        let workReminder = try XCTUnwrap(model.notificationTask)
+        await workReminder.value
+        model.send(.startBreak(try XCTUnwrap(model.stageID)))
+        XCTAssertEqual(model.state, .onBreak)
+
+        let submitted = expectation(description: "Activity completion submitted")
+        submitted.assertForOverFulfill = true
+        center.onAdd = { submitted.fulfill() }
+        clock.advance(180)
+        model.send(.refresh)
+        model.send(.refresh)
+        XCTAssertEqual(model.state, .working)
+        await fulfillment(of: [submitted], timeout: 3)
+
+        let request = try XCTUnwrap(center.pending[NotificationService.activityFinishedIdentifier])
+        XCTAssertEqual(center.additions, 2)
+        XCTAssertTrue(model.canPresentNotification(request))
+        defaults.removeObject(forKey: key)
+        XCTAssertFalse(model.canPresentNotification(request))
+    }
+
+    @MainActor
     func testValidReminderSubmitsAfterSuccessfulPersistence() async throws {
         try await checkReminderSubmission(failStorage: false)
     }

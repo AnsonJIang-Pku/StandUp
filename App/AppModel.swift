@@ -150,6 +150,16 @@ final class AppModel: ObservableObject {
                 notifications.clear()
             case let .remind(id):
                 submitReminder(id, attemptLimit: 2)
+            case let .activityFinished(startedNextWork):
+                if canNotifyActivityFinished {
+                    Task { [weak self] in
+                        guard let self else { return }
+                        await notifications.notifyActivityFinished(startedNextWork: startedNextWork,
+                                                                   sound: ReminderSounds.notificationSound) {
+                            self.canNotifyActivityFinished
+                        }
+                    }
+                }
             case .record:
                 break
             }
@@ -210,6 +220,18 @@ final class AppModel: ObservableObject {
 
     func canPresentReminder(_ request: UNNotificationRequest) -> Bool {
         NotificationService.token(for: request).map(isCurrentReminder) == true && notifications.canPresent(request)
+    }
+
+    private var canNotifyActivityFinished: Bool {
+        running && UserDefaults.standard.bool(forKey: ReminderSounds.activityEndSoundKey)
+            && engine.schedule.window(at: now()) != nil
+    }
+
+    func canPresentNotification(_ request: UNNotificationRequest) -> Bool {
+        if request.identifier == NotificationService.activityFinishedIdentifier {
+            return canNotifyActivityFinished
+        }
+        return canPresentReminder(request)
     }
 
     func handleReminderAction(_ action: String, request: UNNotificationRequest) {

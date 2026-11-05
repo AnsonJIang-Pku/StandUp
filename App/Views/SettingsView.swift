@@ -5,6 +5,7 @@ struct SettingsView: View {
     private static let maximumContentHeight: CGFloat = 355
 
     @ObservedObject var model: AppModel
+    @AppStorage(ReminderSounds.activityEndSoundKey) private var activityEndSoundEnabled = false
     @State private var section: Section = .timer
     @State private var contentHeight = Self.maximumContentHeight
     @State private var timerDraft: TimerDraft
@@ -214,6 +215,7 @@ struct SettingsView: View {
     private var generalSection: some View {
         VStack(alignment: .leading, spacing: 10) {
             ReminderSoundSettings()
+            Toggle("活动结束时播放提示音", isOn: $activityEndSoundEnabled)
             if model.notificationStatus == .notDetermined {
                 Button("启用系统通知", action: model.requestNotifications)
             }

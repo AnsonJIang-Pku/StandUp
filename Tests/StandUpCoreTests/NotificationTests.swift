@@ -70,6 +70,38 @@ final class MockNotificationCenter: LocalNotificationCenter {
 
 final class NotificationTests: XCTestCase {
     @MainActor
+    func testActivityCompletionUsesSelectedSoundAndHasNoReminderActions() async throws {
+        let center = MockNotificationCenter()
+        let service = NotificationService(center: center)
+        let identifier = NotificationService.activityFinishedIdentifier
+        await service.notifyActivityFinished(startedNextWork: true, sound: { .default }) { true }
+        let audible = try XCTUnwrap(center.pending[identifier])
+        XCTAssertEqual(audible.content.title, "活动结束，已开始下一轮")
+        XCTAssertNotNil(audible.content.sound)
+        XCTAssertTrue(audible.content.categoryIdentifier.isEmpty)
+        XCTAssertNil(NotificationService.token(for: audible))
+
+        await service.notifyActivityFinished(startedNextWork: false, sound: { nil }) { true }
+        let silent = try XCTUnwrap(center.pending[identifier])
+        XCTAssertEqual(silent.content.title, "活动结束，可以开始工作了")
+        XCTAssertNil(silent.content.sound)
+        XCTAssertNil(silent.trigger)
+        service.clear()
+        XCTAssertEqual(center.pending.count, 1)
+    }
+
+    @MainActor
+    func testActivityCompletionRequiresPermissionAndAnEnabledSwitch() async {
+        let center = MockNotificationCenter()
+        let service = NotificationService(center: center)
+        center.permission = .denied
+        await service.notifyActivityFinished(startedNextWork: true, sound: { .default }) { true }
+        center.permission = .authorized
+        await service.notifyActivityFinished(startedNextWork: true, sound: { .default }) { false }
+        XCTAssertEqual(center.additions, 0)
+    }
+
+    @MainActor
     func testPermissionDeniedLeavesNoRequestAndGrantCanSubmit() async throws {
         let center = MockNotificationCenter()
         let service = NotificationService(center: center)

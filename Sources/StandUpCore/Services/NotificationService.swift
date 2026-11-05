@@ -43,6 +43,7 @@ extension UNUserNotificationCenter: LocalNotificationCenter {
 @MainActor
 public final class NotificationService {
     public nonisolated static let identifier = "com.standup.reminder.break"
+    public nonisolated static let activityFinishedIdentifier = "com.standup.reminder.activity-finished"
     static let noSnoozeCategory = "com.standup.reminder.break.no-snooze"
     public static let soundName = "StandUpSoft.aiff"
     private nonisolated static let tokenKey = "reminderID"
@@ -110,6 +111,19 @@ public final class NotificationService {
     public func requestPermission() async throws -> NotificationStatus {
         _ = try await center.requestAuthorization(options: [.alert, .sound])
         return await status()
+    }
+
+    public func notifyActivityFinished(startedNextWork: Bool, sound: () -> UNNotificationSound?,
+                                       stillAllowed: () -> Bool) async {
+        guard await status() == .allowed, stillAllowed() else { return }
+        let content = UNMutableNotificationContent()
+        content.title = startedNextWork ? "活动结束，已开始下一轮" : "活动结束，可以开始工作了"
+        content.sound = sound()
+        let request = UNNotificationRequest(identifier: Self.activityFinishedIdentifier,
+                                            content: content, trigger: nil)
+        center.add(request) { error in
+            if let error { NSLog("StandUp activity notification: %@", error.localizedDescription) }
+        }
     }
 
     @discardableResult

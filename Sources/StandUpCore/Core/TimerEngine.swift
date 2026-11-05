@@ -113,7 +113,8 @@ public final class TimerEngine {
             return effects
         }
 
-        advanceIfExpired(at: date, announce: true, effects: &effects)
+        advanceIfExpired(at: date, announce: true, announceActivity: event != .applicationLaunched,
+                         effects: &effects)
         guard let stage = snapshot.stage else { return effects }
 
         switch event {
@@ -168,16 +169,25 @@ public final class TimerEngine {
         stage.id == id && stage.phase == .breakDue && stage.suspension == nil
     }
 
-    private func advanceIfExpired(at date: Date, announce: Bool, effects: inout [TimerEffect]) {
+    private func advanceIfExpired(at date: Date, announce: Bool, announceActivity: Bool = false,
+                                  effects: inout [TimerEffect]) {
         guard let stage = snapshot.stage, let deadline = stage.deadline, date >= deadline else { return }
         if let completion = completionEffect(for: stage, deadline: deadline) {
             effects.append(completion)
         }
-        if stage.phase == .onBreak && !snapshot.configuration.autoStartNextWork {
-            snapshot = TimerSnapshot()
+        if stage.phase == .onBreak {
+            let startedNextWork = snapshot.configuration.autoStartNextWork
+            if startedNextWork {
+                setStage(.working, at: date)
+            } else {
+                snapshot = TimerSnapshot()
+            }
+            if announceActivity {
+                effects.append(.activityFinished(startedNextWork: startedNextWork))
+            }
             return
         }
-        setStage(stage.phase == .onBreak ? .working : .breakDue, at: date)
+        setStage(.breakDue, at: date)
         if announce, let due = snapshot.stage, due.phase == .breakDue {
             effects.append(.remind(due.id))
         }

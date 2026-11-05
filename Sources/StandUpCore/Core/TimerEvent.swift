@@ -12,6 +12,7 @@ public enum Statistic: Equatable {
 
 public enum TimerEffect: Equatable {
     case remind(UUID)
+    case activityFinished(startedNextWork: Bool)
     case clearReminder
     case record(Statistic, UUID, Date)
 }

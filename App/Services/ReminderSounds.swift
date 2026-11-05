@@ -6,6 +6,7 @@ import StandUpCore
 @MainActor
 enum ReminderSounds {
     static let preferenceKey = "reminderSound"
+    static let activityEndSoundKey = "activityEndSoundEnabled"
     static let soft = "soft"
     static let silent = "silent"
     static let systemDefault = "system-default"

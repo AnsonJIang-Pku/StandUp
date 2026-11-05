@@ -21,7 +21,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter,
                                             willPresent notification: UNNotification) async
         -> UNNotificationPresentationOptions {
-        await model.canPresentReminder(notification.request) ? [.banner, .list, .sound] : []
+        await model.canPresentNotification(notification.request) ? [.banner, .list, .sound] : []
     }
 
     nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter,
