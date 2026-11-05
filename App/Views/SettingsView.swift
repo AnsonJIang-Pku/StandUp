@@ -2,8 +2,11 @@ import SwiftUI
 import StandUpCore
 
 struct SettingsView: View {
+    private static let maximumContentHeight: CGFloat = 355
+
     @ObservedObject var model: AppModel
     @State private var section: Section = .timer
+    @State private var contentHeight = Self.maximumContentHeight
     @State private var timerDraft: TimerDraft
     @State private var draftPresetID: String?
     @State private var scheduleDraft: ScheduleConfiguration
@@ -52,6 +55,11 @@ struct SettingsView: View {
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.trailing, 4)
+                .onGeometryChange(for: CGFloat.self) { geometry in
+                    min(ceil(geometry.size.height), Self.maximumContentHeight)
+                } action: { height in
+                    if height > 0 { contentHeight = height }
+                }
             }
             .frame(height: contentHeight)
             .id(section)
@@ -69,14 +77,6 @@ struct SettingsView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, alignment: .center)
-        }
-    }
-
-    private var contentHeight: CGFloat {
-        switch section {
-        case .timer, .schedule: return 325
-        case .presets: return 355
-        case .general: return 190
         }
     }
 
@@ -105,7 +105,21 @@ struct SettingsView: View {
                 Button("保存日程", action: saveSchedule)
                     .buttonStyle(.borderedProminent)
             }
-        case .presets, .general:
+        case .presets:
+            if let editor = presetEditor {
+                HStack {
+                    Button("取消") {
+                        presetEditor = nil
+                        message = nil
+                    }
+                    Spacer()
+                    Button("保存预设") { savePreset(editor) }
+                        .buttonStyle(.borderedProminent)
+                }
+            } else {
+                Button("新建自定义预设") { openPresetEditor() }
+            }
+        case .general:
             EmptyView()
         }
     }
@@ -145,15 +159,6 @@ struct SettingsView: View {
                 TextField("预设名称", text: editor.name)
                     .textFieldStyle(.roundedBorder)
                 TimerConfigurationForm(draft: editor.timer)
-                HStack {
-                    Button("取消") {
-                        presetEditor = nil
-                        message = nil
-                    }
-                    Spacer()
-                    Button("保存预设") { savePreset(editor.wrappedValue) }
-                        .buttonStyle(.borderedProminent)
-                }
             } else {
                 Text("选择「填入」后，可以在计时页调整并保存。")
                     .font(.caption)
@@ -162,7 +167,6 @@ struct SettingsView: View {
                     presetRow(preset)
                     Divider()
                 }
-                Button("新建自定义预设") { openPresetEditor() }
             }
         }
     }
