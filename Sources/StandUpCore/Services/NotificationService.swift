@@ -114,7 +114,8 @@ public final class NotificationService {
 
     @discardableResult
     public func notify(_ token: UUID, workMinutes: Int = TimerConfiguration.defaults.workMinutes,
-                       canSnooze: Bool = true, stillCurrent: () -> Bool) async
+                       canSnooze: Bool = true, sound: (() -> UNNotificationSound?)? = nil,
+                       stillCurrent: () -> Bool) async
         -> (authorization: NotificationStatus, submission: NotificationSubmissionState) {
         let intent = UUID()
         if !Task.isCancelled, stillCurrent(), token != currentRequest?.token, !hasRestoredReminder(token) {
@@ -135,8 +136,12 @@ public final class NotificationService {
         content.body = "你已经连续工作了 \(workMinutes) 分钟。起来走走，活动一下肩颈和腿部吧。"
         content.categoryIdentifier = canSnooze ? Self.identifier : Self.noSnoozeCategory
         content.userInfo = [Self.tokenKey: token.uuidString]
-        content.sound = bundle.url(forResource: Self.soundName, withExtension: nil) == nil
-            ? .default : UNNotificationSound(named: UNNotificationSoundName(Self.soundName))
+        if let sound {
+            content.sound = sound()
+        } else {
+            content.sound = bundle.url(forResource: Self.soundName, withExtension: nil) == nil
+                ? .default : UNNotificationSound(named: UNNotificationSoundName(Self.soundName))
+        }
         let request = UNNotificationRequest(identifier: submission.identifier, content: content, trigger: nil)
         let error: Error? = await withCheckedContinuation { completion in
             center.add(request) { completion.resume(returning: $0) }

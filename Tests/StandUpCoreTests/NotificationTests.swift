@@ -472,6 +472,18 @@ final class NotificationTests: XCTestCase {
     }
 
     @MainActor
+    func testSilentSoundStillSubmitsNotification() async throws {
+        let center = MockNotificationCenter()
+        let service = NotificationService(center: center)
+        let token = UUID()
+        let result = await service.notify(token, sound: { nil }) { true }
+        let request = try XCTUnwrap(center.pending.values.first)
+        XCTAssertEqual(result.submission, .submitted)
+        XCTAssertEqual(NotificationService.token(for: request), token)
+        XCTAssertNil(request.content.sound)
+    }
+
+    @MainActor
     func testSoftSoundIsReadableAndShort() throws {
         let source = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
             .deletingLastPathComponent().deletingLastPathComponent()

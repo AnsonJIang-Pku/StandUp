@@ -189,7 +189,8 @@ final class AppModel: ObservableObject {
             await startupCleanup?.value
             for attempt in 1...attemptLimit {
                 guard !Task.isCancelled, isCurrentReminder(id) else { return }
-                let result = await notifications.notify(id, workMinutes: workMinutes, canSnooze: canSnooze) {
+                let result = await notifications.notify(id, workMinutes: workMinutes, canSnooze: canSnooze,
+                                                        sound: ReminderSounds.notificationSound) {
                     self.isCurrentReminder(id)
                 }
                 guard !Task.isCancelled, isCurrentReminder(id) else { return }

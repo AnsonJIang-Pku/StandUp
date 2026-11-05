@@ -213,11 +213,7 @@ struct SettingsView: View {
 
     private var generalSection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Text("提醒声音")
-                Spacer()
-                Text("Soft（轻柔）").foregroundStyle(.secondary)
-            }
+            ReminderSoundSettings()
             if model.notificationStatus == .notDetermined {
                 Button("启用系统通知", action: model.requestNotifications)
             }
