@@ -2,7 +2,7 @@
 
 <img src="App/Assets.xcassets/AppIcon.appiconset/StandUp-128.png" width="96" height="96" alt="StandUp 应用图标">
 
-StandUp 1.1.2（Build 4）是离线运行的 macOS 原生菜单栏久坐提醒工具。支持 macOS 13 Ventura 及以上，Bundle ID 为 `com.standup.reminder`。Release 包同时包含 Apple Silicon 和 Intel 架构。
+StandUp 1.1.3（Build 5）是离线运行的 macOS 原生菜单栏久坐提醒工具。支持 macOS 13 Ventura 及以上，Bundle ID 为 `com.standup.reminder`。Release 包同时包含 Apple Silicon 和 Intel 架构。
 
 ## 安装与使用
 
